@@ -24,6 +24,7 @@ class DCCNetClient:
         self.gas = gas + "\n"
         self.sock = None
         self.buffer = b""
+        self.text_buffer = ""
         self.current_id = 0
         self.last_received_id = None
         self.last_received_checksum = None
@@ -189,14 +190,23 @@ class DCCNetClient:
                     if not is_duplicate and payload:
                         try:
                             text = payload.decode('utf-8')
-                            print(f"Received text: {text.strip()}")
-                            for line in text.splitlines():
-                                if line:
-                                    md5_input = line.encode('utf-8')
+                            
+                            print(f"\033[93mReceived text:\033[0m '{text.strip()}'")
+                            
+                            for char in text:
+                                if char is not "\n":
+                                    self.text_buffer += char
+                                
+                                else:
+                                    
+                                    md5_input = self.text_buffer.encode('utf-8')
                                     md5_hex = hashlib.md5(md5_input).hexdigest() + "\n"
-                                    print(f"MD5 input: '{line}'")
+                                    
+                                    print(f"\033[31mMD5 input:\033[0m '{self.text_buffer}'")
                                     print(f"MD5 response: {md5_hex.strip()}")
+                                    
                                     self.send_frame(md5_hex.encode('utf-8'))
+                                    self.text_buffer = ""
                         except UnicodeDecodeError:
                             print(f"Binary data received ({len(payload)} bytes), sending ACK.")
                         except Exception as e:
@@ -421,7 +431,9 @@ if __name__ == "__main__":
 
     try:
         host, port = sys.argv[1].split(":")
-        DCCNetClient(host, int(port), sys.argv[2]).run()
+        # DCCNetClient(host, int(port), sys.argv[2]).run()
+        DCCNetClient(host, int(port), "2021039883  :1:705e2ad17eb257f88670a5be2d5be59af2312c73aef08ed205ae8f1713b61b25+c8a2890d7b962a3c0d974bade3936d73939404726a46f34cb4f5f27dd0e4a957").run()
+
     except ValueError:
         print("Invalid HOST:PORT format")
         sys.exit(1)
