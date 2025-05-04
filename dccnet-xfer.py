@@ -38,9 +38,11 @@ def main():
         print("  To run as a server: python3 dccnet-xfer.py -s <PORT> <INPUT> <OUTPUT>")
         print("  To run as a client: python3 dccnet-xfer.py -c <IP>:<PORT> <INPUT> <OUTPUT>")
         sys.exit(1)
-
+    
+    #client ou server
     mode = sys.argv[1]
 
+    #verifica se todos os parametro foram preenchidos
     if len(sys.argv) != 5:
         print("Error: Missing port for server mode.")
         sys.exit(1)
