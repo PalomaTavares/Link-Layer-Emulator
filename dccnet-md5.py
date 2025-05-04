@@ -36,9 +36,8 @@ class DCCNetClient:
         self.sending_lock = threading.Lock()
         self.processing_lock = threading.Lock()
         self.end_received = False
-        self.waiting_for_ack = False
-        self.shutdown_in_progress = False
-
+        self.waiting_ack = False
+    
     def checksum(self, data):
         if len(data) % 2 == 1:
             data += b'\x00'
@@ -46,8 +45,9 @@ class DCCNetClient:
         for i in range(0, len(data), 2):
             total += (data[i] << 8) | data[i+1]
             total = (total & 0xffff) + (total >> 16)
-        return ~total & 0xffff
+        return ~total & 0xffff #o simbolo ~ inverte os bits de total
 
+    #faz o setup do frame
     def build_frame(self, payload=b'', flags=0, frame_id=None):
         if frame_id is None:
             frame_id = self.current_id
@@ -57,9 +57,10 @@ class DCCNetClient:
         header = struct.pack(HEADER_FORMAT, SYNC, SYNC, checksum, len(payload), frame_id, flags)
         return header + payload
 
+    #faz o envio do frame
     def send_frame(self, payload=b'', flags=0, frame_id=None):
         try:
-            with self.sending_lock:
+            with self.sending_lock: # Bloqueia o envio para evitar concorrência
                 if frame_id is None:
                     frame_id = self.current_id
                 frame = self.build_frame(payload, flags, frame_id)
@@ -71,7 +72,7 @@ class DCCNetClient:
                             HEADER_FORMAT, frame, 0)
                         print(f"Sent frame (ID={f_id}, Length={length}, Flags={f_flags:02x})")
                     else:
-                        if self.waiting_for_ack:
+                        if self.waiting_ack:
                             print(f"Queuing frame (ID={frame_id}) - waiting for ACK")
                             self.send_queue.append((payload, flags, frame_id))
                         else:
@@ -79,17 +80,18 @@ class DCCNetClient:
                             sync1, sync2, checksum, length, f_id, f_flags = struct.unpack_from(
                                 HEADER_FORMAT, frame, 0)
                             print(f"Sent frame (ID={f_id}, Length={length}, Flags={f_flags:02x})")
+                            #atualiza o estado da conexão:
                             self.last_frame = frame
                             self.last_sent_time = time.time()
                             self.retries = 0
-                            self.waiting_for_ack = True
+                            self.waiting_ack = True
                 except Exception as e:
                     print(f"Send error: {e}")
                     self.active = False
         except Exception as e:
             print(f"Send frame exception: {e}")
 
-    def validate_frame(self, frame):
+    def validate_frame(self, frame): #garante que o quadro cumpre todos os requisitos
         if len(frame) < HEADER_SIZE:
             print("Frame too short")
             return False
@@ -123,7 +125,7 @@ class DCCNetClient:
 
     def process_frame(self, frame):
         try:
-            with self.processing_lock:
+            with self.processing_lock:# Bloqueia o envio para evitar concorrência
                 if not self.validate_frame(frame):
                     return
 
@@ -133,7 +135,7 @@ class DCCNetClient:
 
                 print(f"Received valid frame - ID: {frame_id}, Flags: {flags:02x}, Length: {length}")
 
-                # Handle RST frame
+                # lida com RST
                 if flags & RST_FLAG:
                     print("RST received - closing connection")
                     if payload:
@@ -144,36 +146,26 @@ class DCCNetClient:
                     self.active = False
                     return
 
-                # Handle ACK frame
+                # Lida com quadro ACK
                 if flags & ACK_FLAG:
                     with self.sending_lock:
-                        print(f"Received ACK with ID={frame_id}, expecting ID={self.current_id}, waiting={self.waiting_for_ack}")
-                        if self.waiting_for_ack and frame_id == self.current_id:
+                        print(f"Received ACK with ID={frame_id}, expecting ID={self.current_id}, waiting={self.waiting_ack}")
+                        if self.waiting_ack and frame_id == self.current_id:
                             print(f"Valid ACK received for ID={frame_id}")
                             self.current_id = 1 - self.current_id
                             self.last_frame = None
-                            self.waiting_for_ack = False
+                            self.waiting_ack = False
                             self.retries = 0
-
-                            if self.shutdown_in_progress:
-                                print("ACK received for client-initiated END frame. Closing.")
-                                self.active = False
-                                return
-
-                            if self.end_received and not self.send_queue:
-                                print("END flag was previously received from server, and final ACK received. Closing.")
-                                self.active = False
-                                return
 
                             if self.send_queue:
                                 next_payload, next_flags, next_id = self.send_queue.pop(0)
                                 print(f"Sending queued frame (ID={self.current_id}, Flags={next_flags:02x})")
-                                self._send_frame_internal(next_payload, next_flags, self.current_id)
+                                self.send_frame_internal(next_payload, next_flags, self.current_id)#envia o proximo da fila de imediato
                         else:
-                            print(f"Unexpected or duplicate ACK received (ID={frame_id}, expecting={self.current_id}, waiting={self.waiting_for_ack})")
+                            print(f"Unexpected or duplicate ACK received (ID={frame_id}, expecting={self.current_id}, waiting={self.waiting_ack})")
                     return
 
-                # Handle Data Frame (potentially with END flag)
+                # Frame de dados podendo terminar com a flag END
                 is_end_frame = bool(flags & END_FLAG)
                 if is_end_frame:
                     print("END flag received from server on data frame")
@@ -217,7 +209,7 @@ class DCCNetClient:
                     print(f"Sending ACK for data frame ID={frame_id}")
                     self.send_frame(b'', ACK_FLAG, frame_id)
 
-                    if is_end_frame and not self.waiting_for_ack and not self.send_queue:
+                    if is_end_frame and not self.waiting_ack and not self.send_queue:
                         print("Processed frame with END flag, ACK sent, nothing pending. Closing.")
                         self.active = False
                         return
@@ -227,7 +219,8 @@ class DCCNetClient:
             print(f"Process frame exception: {e}")
             self.active = False
 
-    def _send_frame_internal(self, payload=b'', flags=0, frame_id=None):
+    #envio de frame/quadro sem controle de fila
+    def send_frame_internal(self, payload=b'', flags=0, frame_id=None):
         if frame_id is None:
             frame_id = self.current_id
 
@@ -243,18 +236,20 @@ class DCCNetClient:
                 self.last_frame = frame
                 self.last_sent_time = time.time()
                 self.retries = 0
-                self.waiting_for_ack = True
+                self.waiting_ack = True
         except Exception as e:
             print(f"Internal send error: {e}")
             self.active = False
 
-    def retransmit_check(self):
+    #verifica se é necessario retransmitir e lida com retransmissap caso necessario
+    def retransmit(self):
         while self.active:
             try:
-                with self.sending_lock:
-                    if self.waiting_for_ack and self.last_frame and time.time() - self.last_sent_time > TIMEOUT:
+                with self.sending_lock:#Bloqueia o envio para evitar concorrência
+                    if self.waiting_ack and self.last_frame and time.time() - self.last_sent_time > TIMEOUT:#esperando ACK, existe last_frame enviado ou timeout
                         if self.retries < MAX_RETRIES:
                             try:
+                                #reenvia ultimo frame
                                 self.sock.sendall(self.last_frame)
                                 self.retries += 1
                                 self.last_sent_time = time.time()
@@ -278,6 +273,7 @@ class DCCNetClient:
                 print(f"Retransmission thread error: {e}")
             time.sleep(0.1)
 
+    #entra em loop de recebimento
     def receive_loop(self):
         while self.active:
             try:
@@ -327,75 +323,14 @@ class DCCNetClient:
                 print(f"Receive error: {e}")
                 self.active = False
 
-    def send_end_frame(self):
-        if self.shutdown_in_progress:
-            return
-
-        self.shutdown_in_progress = True
-        print("Sending END frame")
-
-        try:
-            if self.sending_lock.acquire(timeout=1):
-                try:
-                    if self.waiting_for_ack:
-                        print("Still waiting for ACK, queueing END frame")
-                        self.send_queue.append((b'', END_FLAG, self.current_id))
-                    else:
-                        end_frame = self.build_frame(b'', END_FLAG)
-                        self.sock.sendall(end_frame)
-                        sync1, sync2, checksum, length, f_id, f_flags = struct.unpack_from(
-                            HEADER_FORMAT, end_frame, 0)
-                        print(f"Sent END frame (ID={f_id}, Length={length}, Flags={f_flags:02x})")
-
-                        self.last_frame = end_frame
-                        self.last_sent_time = time.time()
-                        self.retries = 0
-                        self.waiting_for_ack = True
-                finally:
-                    self.sending_lock.release()
-            else:
-                print("Could not acquire lock for END frame, sending RST instead")
-                self.send_rst_frame("Client shutdown - lock timeout")
-        except Exception as e:
-            print(f"Error sending END frame: {e}")
-            self.send_rst_frame("Client shutdown - error")
-
-    def send_rst_frame(self, reason="Client shutdown"):
-        try:
-            rst_frame = self.build_frame(reason.encode(), RST_FLAG, 0xFFFF)
-            self.sock.sendall(rst_frame)
-            print(f"Sent RST frame: {reason}")
-        except Exception as e:
-            print(f"Error sending RST frame: {e}")
-        finally:
-            self.active = False
-
-    def signal_handler(self, sig, frame):
-        print("\nUser interrupt - initiating graceful shutdown")
-        
-        if self.active and not self.shutdown_in_progress:
-            self.send_end_frame()
-            
-            timeout = time.time() + 5
-            while self.active and time.time() < timeout:
-                time.sleep(0.2)
-                
-            if self.active:
-                print("Graceful shutdown timed out, sending RST")
-                self.send_rst_frame("Client shutdown - timeout")
-                
-        sys.exit(0)
-
     def run(self):
         try:
-            signal.signal(signal.SIGINT, self.signal_handler)
-            
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.settimeout(0.5)
             self.sock.connect((self.host, self.port))
             print(f"Connected to {self.host}:{self.port}")
 
-            retrans_thread = threading.Thread(target=self.retransmit_check, daemon=True)
+            retrans_thread = threading.Thread(target=self.retransmit, daemon=True)
             retrans_thread.start()
 
             self.send_frame(self.gas.encode())
@@ -411,12 +346,6 @@ class DCCNetClient:
 
             if self.sock:
                 try:
-                    if not self.end_received and not self.shutdown_in_progress:
-                        self.send_rst_frame("Client shutdown - cleanup")
-                except Exception:
-                    pass
-
-                try:
                     self.sock.close()
                 except Exception:
                     pass
@@ -431,8 +360,7 @@ if __name__ == "__main__":
 
     try:
         host, port = sys.argv[1].split(":")
-        # DCCNetClient(host, int(port), sys.argv[2]).run()
-        DCCNetClient(host, int(port), "2021039883  :1:705e2ad17eb257f88670a5be2d5be59af2312c73aef08ed205ae8f1713b61b25+c8a2890d7b962a3c0d974bade3936d73939404726a46f34cb4f5f27dd0e4a957").run()
+        DCCNetClient(host, int(port), sys.argv[2]).run()
 
     except ValueError:
         print("Invalid HOST:PORT format")
