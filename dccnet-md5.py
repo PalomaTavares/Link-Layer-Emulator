@@ -125,6 +125,25 @@ class DCCNetClient(DCCNet):
             print("Connection closed")
 
 
+def pad_sas_parts(input_str):
+    # Split by '+'
+    parts = input_str.split('+')
+    
+    # Last part is the token, keep it separate
+    *sas_parts, token = parts
+    
+    padded_sas_parts = []
+    for sas in sas_parts:
+        elements = sas.split(':')
+        if elements:
+            # Pad the first element to 12 characters
+            elements[0] = elements[0].ljust(12)
+        padded_sas_parts.append(':'.join(elements))
+    
+    # Reconstruct full string with padded SAS parts and original token
+    result = '+'.join(padded_sas_parts + [token])
+    return result
+
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         print("Usage: python3 dccnet-md5.py HOST:PORT GAS")
@@ -132,7 +151,10 @@ if __name__ == "__main__":
 
     try:
         host, port = sys.argv[1].split(":")
-        DCCNetClient(host, int(port), sys.argv[2]).run()
+        gas = sys.argv[2]
+        gas = pad_sas_parts(gas)
+
+        DCCNetClient(host, int(port), gas).run()
 
     except ValueError:
         print("Invalid HOST:PORT format")
